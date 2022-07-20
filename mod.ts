@@ -16,102 +16,146 @@ const isNodeExported = function (node: ts.Node): boolean {
 const leadingComment = function (sourceFile: ts.SourceFile, n: ts.Node) {
     const [ commentRange ] = ts.getLeadingCommentRanges(sourceFile.getFullText(), n.getFullStart()) ?? [];
     const commentText = commentRange ? sourceFile.getFullText().slice(commentRange.pos, commentRange.end) : '';
-    return commentText.startsWith('/**') ? `${commentText.slice(3, -2).replace(/^\s*\*\s*/gm, '')}` : '';
+    return commentText.startsWith('/**') ? `${commentText.slice(4, -3).replace(/^\s*[*]\s*/gm, '')}` : '';
 };
 
 const parameters = function (sourceFile: ts.SourceFile, node: ts.MethodDeclaration | ts.ConstructorDeclaration) {
-    return node.parameters?.map(p => `${p.name.getText(sourceFile)}: ${p.type?.getText(sourceFile)}`).join(',') ?? '';
+    return node.parameters?.map(p => `${p.name.getText(sourceFile)}: ${p.type?.getText(sourceFile)}`).join(', ') ?? '';
 };
 
 const typeParameters = function (sourceFile: ts.SourceFile, node: ts.MethodDeclaration | ts.ConstructorDeclaration) {
-    return node.typeParameters?.map(p => `${p.name.getText(sourceFile)}: ${p.constraint?.getText(sourceFile)}`).join(',') ?? '';
+    return node.typeParameters?.map(p => `${p.name.getText(sourceFile)}: ${p.constraint?.getText(sourceFile)}`).join(', ') ?? '';
+};
+
+const modifiers = function (sourceFile: ts.SourceFile, node: ts.MethodDeclaration | ts.ConstructorDeclaration | ts.PropertyDeclaration) {
+    return node.modifiers?.map(m => m.getText(sourceFile)).join(' ') ?? '';
+    // return node.modifiers?.map(m => m.getText(sourceFile)) ?? [];
 };
 
 export default function (code: string) {
     const lines: string[] = [];
-    const sourceFile = ts.createSourceFile('./mod.ts', code, ts.ScriptTarget.ESNext);
+    const sourceFile = ts.createSourceFile('./mod.ts', code, ts.ScriptTarget.ESNext, false);
 
     const sourceChildren = sourceFile.statements;
     for (const sourceChild of sourceChildren) {
-        console.log(sourceChild.kind, ts.SyntaxKind[ sourceChild.kind ]);
-        if (sourceChild.kind === ts.SyntaxKind.ClassDeclaration && isNodeExported(sourceChild)) {
-            const classNode: ts.ClassDeclaration = <ts.ClassDeclaration>sourceChild;
+        if (!isNodeExported(sourceChild)) continue;
+        // console.log(sourceChild.kind, ts.SyntaxKind[ sourceChild.kind ]);
 
-            let line = '';
-            const className = classNode.name?.getText(sourceFile);
-            const classComment = leadingComment(sourceFile, classNode);
-            const classHeritage = classNode.heritageClauses?.map(h => h.getText(sourceFile)).join('');
+        if (ts.isInterfaceDeclaration(sourceChild)) {
+            const interfaceNode = <ts.InterfaceDeclaration>sourceChild;
+            const interfaceName = interfaceNode.name?.getText(sourceFile);
+            const interfaceComment = leadingComment(sourceFile, interfaceNode);
 
-            line += `\n## ${className}`;
-            line += ` ${classHeritage}`;
+            let interfaceLine = `\n\n# ${interfaceName} \`interface\``;
+            if (interfaceComment) interfaceLine += `\n${interfaceComment}`;
+            interfaceLine += '\n## Properties';
 
-            if (classComment.startsWith('/**')) {
-                line += `\n${classComment.slice(3, -2).replace(/^\s*\*\s*/gm, '')}`;
+            for (const interfaceChild of interfaceNode.members) {
+                interfaceLine += `\n### \`${interfaceName}.${interfaceChild.getText(sourceFile)} \``;
+                const interfaceComment = leadingComment(sourceFile, interfaceChild);
+                if (interfaceComment) interfaceLine += `\n${interfaceComment}`;
             }
 
-            lines.push(line);
+            lines.push(interfaceLine);
+        } else if (ts.isTypeAliasDeclaration(sourceChild)) {
 
+            const typeNode = <ts.TypeAliasDeclaration>sourceChild;
+            const typeName = typeNode.name?.getText(sourceFile);
+            const typeComment = leadingComment(sourceFile, typeNode);
+            const typeChildren = typeNode.getChildren(sourceFile);
+
+            let typeLine = `\n\n# ${typeName} \`type\``;
+            if (typeComment) typeLine += `\n${typeComment}`;
+
+            for (const typeChild of typeChildren) {
+                if (ts.isTypeLiteralNode(typeChild)) {
+                    typeLine += '\n## Properties';
+                    const typeLiteralNode = <ts.TypeLiteralNode>typeChild;
+                    for (const memberNode of typeLiteralNode?.members) {
+                        typeLine += `\n### \`${typeName}.${memberNode.getText(sourceFile)} \``;
+                        const memberComment = leadingComment(sourceFile, memberNode);
+                        if (memberComment) typeLine += `\n${memberComment}`;
+                    }
+                } else if ([
+                    ts.SyntaxKind.UnionType,
+                    ts.SyntaxKind.LiteralType,
+                    ts.SyntaxKind.TypeReference
+                ].includes(typeChild.kind)) {
+                    typeLine += '\n## Value';
+                    typeLine += `\n### \`${typeChild.getText(sourceFile)} \``;
+                    const typeChildComment = leadingComment(sourceFile, typeChild);
+                    if (typeChildComment) typeLine += `\n${typeChildComment}`;
+                }
+            }
+
+            lines.push(typeLine);
+        } else if (ts.isClassDeclaration(sourceChild)) {
+            const staticPropertyLines = [];
+            const staticMethodLines = [];
+            const instancePropertyLines = [];
+            const instanceMethodLines = [];
+
+            const classNode = <ts.ClassDeclaration>sourceChild;
             const classChildren = classNode.members;
-            for (const classChild of classChildren) {
-                console.log(classChild.kind, ts.SyntaxKind[ classChild.kind ]);
-                if (classChild.kind === ts.SyntaxKind.PropertyDeclaration) {
-                    const propertyNode = <ts.PropertyDeclaration>classChild;
-                    if (ts.isPrivateIdentifier(propertyNode.name)) continue;
+            const className = classNode.name?.getText(sourceFile);
+            const classComment = leadingComment(sourceFile, classNode);
+            // const classHeritage = classNode.heritageClauses?.map(h => h.getText(sourceFile)).join('');
 
-                    let line = '';
+            let classLine = `\n\n# ${className} \`class\``;
+            if (classComment) classLine += `\n${classComment}`;
+            classLine += `\n## Constructor`;
+            lines.push(classLine);
+
+            for (const classChild of classChildren) {
+                if (ts.isPropertyDeclaration(classChild)) {
+                    if (ts.isPrivateIdentifier((classChild as ts.PropertyDeclaration).name)) continue;
+
+                    const propertyNode = <ts.PropertyDeclaration>classChild;
                     const propertyName = propertyNode.name.getText(sourceFile);
                     const propertyType = propertyNode.type?.getText(sourceFile);
                     const propertyComment = leadingComment(sourceFile, propertyNode);
                     const propertyInitializer = propertyNode.initializer?.getText(sourceFile);
-                    const propertyModifier = propertyNode.modifiers?.[ 0 ].getText(sourceFile) ?? '';
+                    const propertyModifiers = modifiers(sourceFile, propertyNode);
 
-                    line += `\n### `;
+                    let propertyLine = '\n### `';
+                    propertyLine += `${className}.${propertyName}`;
+                    if (propertyType) propertyLine += `: ${propertyType}`;
+                    else propertyLine += ` = ${propertyInitializer}`;
+                    propertyLine += '`';
+                    if (propertyComment) propertyLine += `\n${propertyComment}`;
 
-                    if (propertyModifier) line += `${propertyModifier} `;
+                    if (propertyModifiers.includes('static')) staticPropertyLines.push(propertyLine);
+                    else instancePropertyLines.push(propertyLine);
 
-                    if (propertyType) {
-                        line += `${className}.${propertyName}: ${propertyType}`;
-                    } else {
-                        line += `${className}.${propertyName} = ${propertyInitializer}`;
-                    }
+                } else if (ts.isConstructorDeclaration(classChild)) {
 
-                    if (propertyComment) line += `\n${propertyComment}`;
-
-                    lines.push(line);
-                } else if (classChild.kind === ts.SyntaxKind.Constructor) {
                     const constructorNode = <ts.ConstructorDeclaration>classChild;
-
-                    let line = '';
-                    const constructorName = 'constructor';
                     const constructorComment = leadingComment(sourceFile, constructorNode);
                     const constructorReturnType = constructorNode.type?.getText(sourceFile);
-                    const constructorModifier = constructorNode.modifiers?.[ 0 ].getText(sourceFile) ?? '';
                     const constructorParameters = parameters(sourceFile, constructorNode);
                     const constructorTypeParameters = typeParameters(sourceFile, constructorNode);
 
-                    line += `\n### `;
-                    if (constructorModifier) line += `${constructorModifier} `;
-                    line += `${className}.${constructorName}`;
-                    if (constructorTypeParameters) line += `<${constructorTypeParameters}> `;
-                    line += `(`;
-                    if (constructorParameters) line += `${constructorParameters}`;
-                    line += `)`;
-                    if (constructorReturnType) line += `: ${constructorReturnType}`;
+                    let constructorLine = '\n### `';
+                    constructorLine += `${className}`;
+                    if (constructorTypeParameters) constructorLine += `<${constructorTypeParameters}> `;
+                    constructorLine += `(`;
+                    if (constructorParameters) constructorLine += `${constructorParameters}`;
+                    constructorLine += `)`;
+                    if (constructorReturnType) constructorLine += `: ${constructorReturnType}`;
+                    constructorLine += '`';
+                    if (constructorComment) constructorLine += `\n${constructorComment}`;
 
-                    if (constructorComment) line += `\n${constructorComment}`;
+                    lines.push(constructorLine);
 
-                    lines.splice(1, 0, line);
-                } else if (classChild.kind === ts.SyntaxKind.MethodDeclaration) {
+                } else if (ts.isMethodDeclaration(classChild)) {
+                    if (ts.isPrivateIdentifier((classChild as ts.MethodDeclaration).name)) continue;
+
                     const methodNode = <ts.MethodDeclaration>classChild;
-
-                    if (ts.isPrivateIdentifier(methodNode.name)) continue;
-
-                    let line = '';
                     const methodName = methodNode.name.getText(sourceFile);
+                    const methodModifiers = modifiers(sourceFile, methodNode);
+                    const methodParameters = parameters(sourceFile, methodNode);
                     const methodComment = leadingComment(sourceFile, methodNode);
                     const methodReturnType = methodNode.type?.getText(sourceFile);
-                    const methodModifier = methodNode.modifiers?.[ 0 ].getText(sourceFile) ?? '';
-                    const methodParameters = parameters(sourceFile, methodNode);
                     const methodTypeParameters = typeParameters(sourceFile, methodNode);
                     // console.log(comment);
                     // console.log(methodNode);
@@ -120,20 +164,26 @@ export default function (code: string) {
                     // console.log(methodNode.body?.getText(sourceFile));
                     // console.log(result);
 
-                    line += `\n### `;
-                    if (methodModifier) line += `${methodModifier} `;
-                    line += `${className}.${methodName}`;
-                    if (methodTypeParameters) line += `<${methodTypeParameters}> `;
-                    line += `(`;
-                    if (methodParameters) line += `${methodParameters}`;
-                    line += `)`;
-                    if (methodReturnType) line += `: ${methodReturnType}`;
+                    let methodLine = '\n### `';
+                    methodLine += `${className}.${methodName}`;
+                    if (methodTypeParameters) methodLine += `<${methodTypeParameters}> `;
+                    methodLine += `(`;
+                    if (methodParameters) methodLine += `${methodParameters}`;
+                    methodLine += `)`;
+                    if (methodReturnType) methodLine += `: ${methodReturnType}`;
+                    methodLine += '`';
+                    if (methodComment) methodLine += `\n${methodComment}`;
 
-                    if (methodComment) line += `\n${methodComment}`;
+                    if (methodModifiers.includes('static')) staticMethodLines.push(methodLine);
+                    else instanceMethodLines.push(methodLine);
 
-                    lines.push(line);
                 }
             }
+
+            if (staticPropertyLines.length) lines.push('\n## Static Properties', ...staticPropertyLines);
+            if (staticMethodLines.length) lines.push('\n## Static Methods', ...staticMethodLines);
+            if (instancePropertyLines.length) lines.push('\n## Instance Properties', ...instancePropertyLines);
+            if (instanceMethodLines.length) lines.push('\n## Instance Methods', ...instanceMethodLines);
 
         }
     }
